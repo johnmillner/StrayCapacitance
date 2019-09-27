@@ -1,0 +1,300 @@
+//**************************************************************************************
+//
+//  LL_v08 -- Lunar Lander (Make-a-thon 2019)
+//            For STM32F446RE Nucleo-64 board
+//
+//            v08:  Serial data out to secondary Arduino
+//
+//            - Created from v07.
+//            - Transmitting string lengths to secondary Arduino to drive the motors
+//
+//            - IN PROGRESS:
+//
+//            - TODO:
+//                - Check for out-of-bounds limits
+//
+//            - NOTES:
+//                - Position 1 (button, pulley, etc) is 6 o'clock position;
+//                      position 2 is 10 o'clock position;
+//                      position 3 is 2 o'clock position
+//
+//
+//**************************************************************************************
+
+#include <SoftwareSerial.h>
+#include <Adafruit_NeoPixel.h>
+#ifdef __AVR__
+  #include <avr/power.h>
+#endif
+
+//#define STM32               // Specifics for STM32 board
+
+#define iButton1  10
+#define iButton2  11
+#define iButton3  12
+
+#define ROCKET_START_X    0
+#define ROCKET_START_Y    0
+#define ROCKET_START_Z    30
+
+#define PULLEY1X    0
+#define PULLEY1Y    -16
+#define PULLEY1Z    37
+#define PULLEY2X    -13.856
+#define PULLEY2Y    8
+#define PULLEY2Z    37
+#define PULLEY3X    13.856
+#define PULLEY3Y    8
+#define PULLEY3Z    37
+#define OFFSET1X    0
+#define OFFSET1Y    -1
+#define OFFSET1Z    2.1
+#define OFFSET2X    -0.866
+#define OFFSET2Y    0.5
+#define OFFSET2Z    2.1
+#define OFFSET3X    0.866
+#define OFFSET3Y    0.5
+#define OFFSET3Z    2.1
+
+#define THRUST        1                 // Magnitude of THRUST (irrespective of 3D direction)
+#define START_FUEL    100               // Amount of fuel at start
+#define DELTA_FUEL    1                 // Fuel used per iteration (positive number, will be subtracted)
+
+#define NEOPIX_STATUS_PIN     4         // Status LEDs
+#define NEOPIX_PAD1_PIN       5         // Landing LEDs (all 3 daisy-chained)
+#define NEOPIX_PAD2_PIN       6         // Landing LEDs (all 3 daisy-chained)
+#define NEOPIX_PAD3_PIN       7         // Landing LEDs (all 3 daisy-chained)
+
+int i;
+//double rocketPos.x, rocketPos.y, rocketPos.z;
+//double accel.x, accel.y, accel.z;
+//double velocity.x, velocity.y, velocity.z;
+struct Coordinate
+{
+  float x;
+  float y;
+  float z;
+};
+struct Coordinate rocketPos, accel, velocity;
+double gravity;
+float fuel, deltaFuel;
+boolean btn1, btn2, btn3;
+double length1, length2, length3;
+union
+{
+  byte asBytes[4];
+  float asFloat;
+}  convertToFloat;
+
+Adafruit_NeoPixel statusLEDs = Adafruit_NeoPixel(93, NEOPIX_STATUS_PIN, NEO_GRB + NEO_KHZ800);
+Adafruit_NeoPixel pad1LEDs = Adafruit_NeoPixel(93, NEOPIX_PAD1_PIN, NEO_GRB + NEO_KHZ800);
+Adafruit_NeoPixel pad2LEDs = Adafruit_NeoPixel(93, NEOPIX_PAD2_PIN, NEO_GRB + NEO_KHZ800);
+Adafruit_NeoPixel pad3LEDs = Adafruit_NeoPixel(93, NEOPIX_PAD3_PIN, NEO_GRB + NEO_KHZ800);
+
+SoftwareSerial ctrl2Serial(2,3);               // Rx, Tx
+
+
+
+void setup()
+{
+  // Init I/O...
+  pinMode(iButton1, INPUT_PULLUP);
+  pinMode(iButton2, INPUT_PULLUP);
+  pinMode(iButton3, INPUT_PULLUP);
+  pinMode(LED_BUILTIN, OUTPUT);
+
+//  HardwareSerial Serial2(PA10, PA9);
+#ifdef ARDUINO
+  Serial.begin(115200);
+#endif
+#ifdef STM32
+  Serial2.begin(9600);
+#endif
+  ctrl2Serial.begin(38400);
+
+  statusLEDs.begin();
+  statusLEDs.show(); // Initialize all pixels to 'off'
+/*  
+  colorWipe(statusLEDs.Color(255, 0, 0), 0);                                 // Red
+  delay(3000);
+  colorWipe(statusLEDs.Color(255, 255, 255), 0);                             // White
+  delay(3000);
+  colorWipe(statusLEDs.Color(0, 0, 0), 0);                                   // Off
+*/
+
+  i=0;
+
+  ResetRocket();
+  Serial.println("Initialized.");
+}
+
+
+// Fill the dots one after the other with a color
+void colorWipe(uint32_t c, uint8_t wait)
+{
+  for(uint16_t i=0; i<statusLEDs.numPixels(); i++)
+  {
+    statusLEDs.setPixelColor(i, c);
+    statusLEDs.show();
+    delay(wait);
+  }
+}
+
+
+void loop()
+{
+  while ((rocketPos.z > 0) && (fuel > 0))
+  {
+    // User-input processing...
+    btn1 = !digitalRead(iButton1);
+    btn2 = !digitalRead(iButton2);
+    btn3 = !digitalRead(iButton3);
+
+    // Reset acceleration f/this iteration...
+    accel.x = 0;
+    accel.y = 0;
+    accel.z = 0;
+
+    if (btn1)
+    {
+      accel.y += (THRUST * 0.7071);
+      accel.z += (THRUST * 0.7071);                  // Vertical THRUST
+      fuel += deltaFuel;
+    }
+
+    if (btn2)
+    {
+      accel.x += (THRUST * 0.7071 * (0.866));
+      accel.y += (THRUST * 0.7071 * (-0.5));
+      accel.z += (THRUST * 0.7071);                  // Vertical THRUST
+      fuel += deltaFuel;
+    }
+    
+    if (btn3)
+    {
+      accel.x += (THRUST * 0.7071 * (-0.866));
+      accel.y += (THRUST * 0.7071 * (-0.5));
+      accel.z += (THRUST * 0.7071);                  // Vertical thrust
+      fuel += deltaFuel;
+    }
+    
+    // Calculate new velocities and positions...
+    velocity.x = velocity.x + accel.x;
+    velocity.y = velocity.y + accel.y;
+    velocity.z = velocity.z + gravity + accel.z;
+    rocketPos.x = rocketPos.x + (velocity.x * 0.1);
+    rocketPos.y = rocketPos.y + (velocity.y * 0.1);
+    rocketPos.z = rocketPos.z + (velocity.z * 0.1);
+
+
+    // TODO -- out of bounds check.
+
+
+    // Fuel check...
+    if (fuel <= 0)
+      Serial.println("Out of fuel!");
+
+      
+    // Calculate pulley-string lengths...
+    // Pulley 1 (P1) is on the same side Button 1 (B1), etc.
+    // Length 1 is the length from pulley 1 to the rocket (offset for string-holding position)
+    // Variables/constants:
+    // - pulley1X, pulley1Y, pulley1Z = pulley position (top of string where it rotates towards motor)
+    //    (similarly for pulley2 and pulley3)
+    // - rocketX, rocketY, rocketZ = reference point (bottom center) of rocket
+    // - length1, length2, length3 = string lengths
+    // - offset1X, offset1Y, offset1Z = offset from rocket reference to point where string is held
+    //    (similarly for pulley2 and pulley3)
+    // length1 = Sqrt((pulley1X-(rocketX+offset1X))^2 + (pulley1Y(rocketY+offset1Y))^2 + (pulley1Z-(rocketZ+offset1Z))^2)
+    length1 = sqrt(sq(PULLEY1X-(rocketPos.x+OFFSET1X)) + sq(PULLEY1Y-(rocketPos.y+OFFSET1Y)) + sq(PULLEY1Z-(rocketPos.z+OFFSET1Z)));
+    length2 = sqrt(sq(PULLEY2X-(rocketPos.x+OFFSET2X)) + sq(PULLEY2Y-(rocketPos.y+OFFSET2Y)) + sq(PULLEY2Z-(rocketPos.z+OFFSET2Z)));
+    length3 = sqrt(sq(PULLEY3X-(rocketPos.x+OFFSET3X)) + sq(PULLEY3Y-(rocketPos.y+OFFSET3Y)) + sq(PULLEY3Z-(rocketPos.z+OFFSET3Z)));
+
+
+    // Debug output...
+    if (accel.z == 0)
+      Serial.print("    Acc: ");
+    else
+      Serial.print("### Acc: ");
+    Serial.print(accel.x);
+    Serial.print(", ");
+    Serial.print(accel.y);
+    Serial.print(", ");
+    Serial.print(accel.z);
+    Serial.print("  |  Vel:");
+    Serial.print(velocity.x);
+    Serial.print(", ");
+    Serial.print(velocity.y);
+    Serial.print(", ");
+    Serial.print(velocity.z);
+    Serial.print("  |  Pos:");
+    Serial.print(rocketPos.x);
+    Serial.print(", ");
+    Serial.print(rocketPos.y);
+    Serial.print(", ");
+    Serial.print(rocketPos.z);
+    Serial.print("  | Fuel = ");
+    Serial.print(fuel);
+    Serial.print("  | Lengths = ");
+    Serial.print(length1);
+    Serial.print(", ");
+    Serial.print(length2);
+    Serial.print(", ");
+    Serial.println(length3);
+
+
+    
+    //TODO -- Transmit lengths to next Arduino...
+    ctrl2Serial.write(0xAC);
+    convertToFloat.asFloat = length1;
+    ctrl2Serial.write(convertToFloat.asBytes[0]);
+    ctrl2Serial.write(convertToFloat.asBytes[1]);
+    ctrl2Serial.write(convertToFloat.asBytes[2]);
+    ctrl2Serial.write(convertToFloat.asBytes[3]);
+    convertToFloat.asFloat = length2;
+    ctrl2Serial.write(convertToFloat.asBytes[0]);
+    ctrl2Serial.write(convertToFloat.asBytes[1]);
+    ctrl2Serial.write(convertToFloat.asBytes[2]);
+    ctrl2Serial.write(convertToFloat.asBytes[3]);
+    convertToFloat.asFloat = length3;
+    ctrl2Serial.write(convertToFloat.asBytes[0]);
+    ctrl2Serial.write(convertToFloat.asBytes[1]);
+    ctrl2Serial.write(convertToFloat.asBytes[2]);
+    ctrl2Serial.write(convertToFloat.asBytes[3]);
+    ctrl2Serial.write(0x69);
+
+
+    //TODO -- For debugging.  Adjust this...
+    delay(200);
+  }
+
+  // Out of calc loop.  Check why...
+  if (rocketPos.z <= 0)
+  {
+    Serial.println("ON THE GROUND!");
+    while (1);                                      // Wait for reset
+  }
+  else if (fuel <=0)
+  {
+    Serial.println("OUT OF FUEL!");
+    while (1);                                      // Wait for reset
+  }
+}
+
+
+void ResetRocket(void)
+{
+  // Initial rocket position...
+  rocketPos.x = ROCKET_START_X;
+  rocketPos.y = ROCKET_START_Y;
+  rocketPos.z = ROCKET_START_Z;
+  velocity.x = 0;
+  velocity.y = 0;
+  velocity.z = 0;
+  accel.x = 0;
+  accel.y = 0;
+  accel.z = -0.5;
+  gravity = -0.25;
+  fuel = START_FUEL;
+  deltaFuel = -DELTA_FUEL;
+}
